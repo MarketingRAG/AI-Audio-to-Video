@@ -1,4 +1,4 @@
-# Step 1: Importing the necessary libraries
+# Step 1: Import the necessary libraries
 import whisper
 import os
 from datetime import timedelta
@@ -14,13 +14,14 @@ import json
 import re
 from datetime import datetime
 
-# Step 2: Configuring the LLM API
+# Step 2: Configure the LLM API
 # Load environment variables
 load_dotenv()
 
 # Configure Gemini API
 genai.configure(api_key=os.getenv('GEMINI_API_KEY'))
 
+# Step 3: Define utility functions for video and subtitle processing
 def format_timedelta(seconds):
     """Convert seconds to SRT timestamp format (HH:MM:SS,mmm)"""
     td = timedelta(seconds=seconds)
@@ -135,6 +136,7 @@ def get_background_images(directory='background_images'):
     
     return image_files
 
+# Step 4: Main video processing function
 def create_full_video(audio_path, srt_path, output_path):
     """Create the full-length video with subtitles."""
     # Load the audio file
@@ -227,6 +229,7 @@ def sanitize_filename(title):
     safe_title = safe_title[:100]
     return safe_title.strip()
 
+# Step 5: Clip extraction function
 def extract_clips(video_path, clips_data, output_dir='clips'):
     """Extract clips from video using timestamps."""
     os.makedirs(output_dir, exist_ok=True)
@@ -268,7 +271,7 @@ def extract_clips(video_path, clips_data, output_dir='clips'):
         except:
             pass
 
-# Step 7: Utility Functions
+# Step 6: Utility function for audio file management
 def get_audio_files(directory='audio_file'):
     """Get all audio files from the specified directory."""
     audio_extensions = ['.mp3', '.wav', '.m4a', '.ogg']
@@ -285,7 +288,7 @@ def get_audio_files(directory='audio_file'):
     
     return audio_files
 
-# Step 6: Main Execution Flow
+# Step 7: Main execution flow
 def main():
     # Get audio files from the audio_file directory
     audio_files = get_audio_files()

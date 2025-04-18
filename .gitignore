@@ -6,6 +6,7 @@
 # Dependencies
 /node_modules
 /venv
+.venv/
 __pycache__/
 *.py[cod]
 *$py.class
@@ -14,6 +15,10 @@ __pycache__/
 /dist
 /build
 *.egg-info/
+
+# Project specific directories
+/output/
+/background_images/
 
 # IDE specific files
 .idea/
