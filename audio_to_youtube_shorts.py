@@ -6,8 +6,7 @@ from datetime import timedelta
 from moviepy.video.io.VideoFileClip import VideoFileClip
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 from moviepy.video.VideoClip import ImageClip, ColorClip, TextClip
-from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
-from moviepy.video.compositing.concatenate import concatenate_videoclips
+from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip, concatenate_videoclips
 import pysrt
 import numpy as np
 import google.generativeai as genai
@@ -486,9 +485,11 @@ def create_full_video(audio_path, srt_path, output_path):
                 
                 # Create a new clip with the adjusted duration
                 try:
-                    # Ensure we handle cases where the last clip might not have a standard 'resize' or other ImageClip/ColorClip methods directly
-                    # Re-creating based on type or using with_duration which is generally safe.
-                    adjusted_last_clip = last_clip.with_duration(new_last_clip_duration)
+                    # For ColorClip, we need to create a new instance with the new duration
+                    if isinstance(last_clip, ColorClip):
+                        adjusted_last_clip = ColorClip(size=last_clip.size, color=last_clip.color, duration=new_last_clip_duration)
+                    else:
+                        adjusted_last_clip = last_clip.with_duration(new_last_clip_duration)
                     
                     # Close the old last_clip if it's not the same object and has a close method
                     if last_clip != adjusted_last_clip and hasattr(last_clip, 'close') and callable(last_clip.close):
@@ -563,60 +564,24 @@ def create_full_video(audio_path, srt_path, output_path):
         logging.error(f"MoviePy related error during video creation for '{audio_path}': {str(e)}")
     except Exception as e: # Catch any other unexpected error
         logging.exception(f"Unexpected error during full video creation for '{audio_path}':")
-    try:
-        video_with_subtitles.write_videofile(
-            output_path,
-            codec="libx264",
-            fps=24,
-            audio_codec="aac",
-            threads=4,
-            preset='faster',
-            bitrate="5000k",
-            logger='bar' 
-        )
-        logging.info(f"Successfully wrote video file to '{output_path}'")
-    except (OSError, RuntimeError) as e:
-        logging.error(f"MoviePy error writing video file '{output_path}': {str(e)}. Ensure FFmpeg is installed and you have write permissions.")
-    except Exception as e:
-        logging.exception(f"Unexpected error writing video file '{output_path}':")
     finally:
         # Clean up
-        if 'video_with_subtitles' in locals(): video_with_subtitles.close()
-        if 'audio_clip' in locals() and audio_clip: audio_clip.close() # Check audio_clip is not None
-        # video_segments and subtitle_clips_list elements are closed if they are part of final_clips_for_composition
-        # by video_with_subtitles.close().
-        # The original elements of prepared_bg_clips (that formed final_background_track)
-        # should be closed when final_background_track is closed if concatenate_videoclips manages this.
-        # If concatenate_videoclips doesn't close its sources, or if it fails, they might need individual closing.
-        # However, `prepared_bg_clips` might contain a new adjusted_last_clip, and the original last_clip was closed.
-        # It's complex; MoviePy's memory management can be tricky.
-        # CompositeVideoClip is expected to close its `clips` list elements.
-        # If final_background_track was part of `video_with_subtitles.clips`, it gets closed.
-        # If final_background_track itself is a CompositeClip (like from concatenate_videoclips), it should close its sources.
-
-        # Safest to close what we explicitly know might not be in the final composite if errors occurred early.
-        # If video_with_subtitles was successfully created, its .close() should handle most.
-        # The individual clips in prepared_bg_clips (if not part of final_background_track due to error)
-        # or subtitle_clips_list (if not part of video_with_subtitles) might need closing.
+        if 'video_with_subtitles' in locals() and video_with_subtitles: 
+            video_with_subtitles.close()
+        if 'audio_clip' in locals() and audio_clip: 
+            audio_clip.close()
         
-        # If final_background_track was created but not used in video_with_subtitles (e.g. error before that stage)
+        # Clean up individual clips that weren't part of the final composition
         if 'final_background_track' in locals() and final_background_track:
-             if not video_with_subtitles or (video_with_subtitles and final_background_track not in video_with_subtitles.clips):
+            if not video_with_subtitles or (video_with_subtitles and final_background_track not in getattr(video_with_subtitles, 'clips', [])):
                 if hasattr(final_background_track, 'close') and callable(final_background_track.close):
                     logging.debug("Closing final_background_track as it's not in the final composite video.")
                     final_background_track.close()
-        elif 'prepared_bg_clips' in locals(): # If final_background_track failed creation
-            logging.debug("Closing individual prepared_bg_clips as final_background_track was not created/used.")
-            for clip in prepared_bg_clips:
-                if hasattr(clip, 'close') and callable(clip.close):
-                    clip.close()
-
-        # Subtitle clips (excluding the bg_clip which is the first one)
-        for i, clip_obj in enumerate(subtitle_clips_list):
-            if clip_obj and (not video_with_subtitles or clip_obj not in video_with_subtitles.clips):
+        
+        # Clean up subtitle clips
+        for clip_obj in subtitle_clips_list:
+            if clip_obj and (not video_with_subtitles or clip_obj not in getattr(video_with_subtitles, 'clips', [])):
                 if hasattr(clip_obj, 'close') and callable(clip_obj.close):
-                    # The first subtitle_clip is the semi-transparent bg, others are TextClips
-                    logging.debug(f"Closing subtitle_clips_list item {i} as it's not in the final composite video.")
                     clip_obj.close()
 
 def sanitize_filename(title):
