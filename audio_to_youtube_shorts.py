@@ -7,6 +7,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from moviepy.audio.io.AudioFileClip import AudioFileClip
 from moviepy.video.VideoClip import ImageClip, ColorClip, TextClip
 from moviepy.video.compositing.CompositeVideoClip import CompositeVideoClip
+from moviepy.video.compositing.concatenate import concatenate_videoclips
 import pysrt
 import numpy as np
 import google.generativeai as genai
@@ -226,85 +227,153 @@ def _prepare_background_segments(subtitles, available_background_images, determi
     """
     Prepares a list of ImageClip or ColorClip segments for the video background.
     Cycles through available_background_images. Uses a black ColorClip as fallback.
-    Returns a list of video segments and the (potentially updated) video_size.
+    Prepares a list of ImageClip or ColorClip segments for the video background.
+    These clips will only have their duration set, not start times.
+    Cycles through available_background_images. Uses a black ColorClip as fallback.
+    Returns a list of video segments for concatenation and the (potentially updated) video_size.
     """
-    video_segments = []
+    video_segments_for_concatenation = []
+    video_size = determined_video_size  # May be None initially
     current_image_index = -1
-    video_size = determined_video_size # May be None initially
 
-    if not subtitles and not available_background_images: # No subtitles to guide segments, and no images
-        logging.warning("No subtitles or background images to create timed segments. Creating a single black background for full audio duration.")
-        if video_size is None: video_size = (1080, 1920) # Default if no other info
-        fallback_segment = ColorClip(size=video_size, color=(0,0,0), duration=audio_duration).with_start(0)
-        video_segments.append(fallback_segment)
-        return video_segments, video_size
-    
-    if not subtitles and available_background_images: # No subtitles, but images exist - create one segment with first image
-        logging.info("No subtitles found. Using the first background image for the entire duration.")
-        current_image_path = available_background_images[0]
+    # Case 1: No subtitles
+    if not subtitles:
+        segment_duration = audio_duration
+        clip_to_add = None
+        image_path_for_segment = None
+        source_type = "ColorClip" # Default for logging if no image is used
+
         try:
-            image_clip_to_add = ImageClip(current_image_path)
-            if video_size is None: video_size = image_clip_to_add.size
-            if image_clip_to_add.size != video_size:
-                resized_clip = image_clip_to_add.resized(video_size)
-                image_clip_to_add.close()
-                image_clip_to_add = resized_clip
-            segment = image_clip_to_add.with_duration(audio_duration).with_start(0)
-            video_segments.append(segment)
-        except Exception as e:
-            logging.error(f"Failed to load the single background image '{current_image_path}': {e}. Using black background.")
-            if video_size is None: video_size = (1080, 1920)
-            segment = ColorClip(size=video_size, color=(0,0,0), duration=audio_duration).with_start(0)
-            video_segments.append(segment)
-        return video_segments, video_size
+            if available_background_images:
+                image_path_for_segment = available_background_images[0]
+                logging.info(f"No subtitles. Using first available background image: '{image_path_for_segment}' for full duration.")
+                temp_image_clip = ImageClip(image_path_for_segment)
+                if video_size is None:
+                    video_size = temp_image_clip.size
+                    logging.info(f"Video size determined from '{image_path_for_segment}': {video_size}")
+                if temp_image_clip.size != video_size:
+                    resized_clip = temp_image_clip.resized(video_size)
+                    temp_image_clip.close()
+                    temp_image_clip = resized_clip
+                clip_to_add = temp_image_clip.with_duration(segment_duration)
+                source_type = f"ImageClip ('{image_path_for_segment}')"
+            elif default_fallback_image_path and os.path.isfile(default_fallback_image_path) and os.access(default_fallback_image_path, os.R_OK):
+                image_path_for_segment = default_fallback_image_path
+                logging.info(f"No subtitles and no images in {BACKGROUND_IMAGES_DIR}. Using default fallback image: '{image_path_for_segment}' for full duration.")
+                temp_image_clip = ImageClip(image_path_for_segment)
+                if video_size is None:
+                    video_size = temp_image_clip.size
+                    logging.info(f"Video size determined from '{image_path_for_segment}': {video_size}")
+                if temp_image_clip.size != video_size:
+                    resized_clip = temp_image_clip.resized(video_size)
+                    temp_image_clip.close()
+                    temp_image_clip = resized_clip
+                clip_to_add = temp_image_clip.with_duration(segment_duration)
+                source_type = f"ImageClip ('{image_path_for_segment}')"
+            else:
+                if video_size is None:
+                    video_size = (1080, 1920)
+                    logging.info(f"No subtitles, no available images, and no usable default fallback. Video size defaulted to {video_size}.")
+                else:
+                    logging.info(f"No subtitles, no available images, and no usable default fallback. Using pre-determined video size: {video_size}.")
+                logging.warning("Creating a single black ColorClip for the full audio duration as no images are available.")
+                clip_to_add = ColorClip(size=video_size, color=(0, 0, 0), duration=segment_duration)
+                source_type = "ColorClip (black fallback)"
 
-    # Main loop for creating segments based on subtitle timings (approx 3 subtitles per background)
-    for i in range(0, len(subtitles), 3):
-        current_image_index = (current_image_index + 1) # Cycle through images
+            if clip_to_add:
+                video_segments_for_concatenation.append(clip_to_add)
+                logging.debug(f"Prepared single background segment using {source_type} with duration {segment_duration}s.")
+            else:
+                # This case should ideally not be reached if logic is correct, but as a safeguard:
+                if video_size is None: video_size = (1080, 1920) # Ensure video_size is set
+                logging.error("Failed to create any background clip in no-subtitle scenario. Adding a default black ColorClip.")
+                fallback_clip = ColorClip(size=video_size, color=(0,0,0), duration=segment_duration)
+                video_segments_for_concatenation.append(fallback_clip)
+
+        except Exception as e:
+            logging.error(f"Error processing background for no-subtitle case (image: '{image_path_for_segment}'): {e}. Using black ColorClip fallback.")
+            if 'temp_image_clip' in locals() and clip_to_add != temp_image_clip : temp_image_clip.close() # temp_image_clip might not be defined
+            if clip_to_add and clip_to_add not in video_segments_for_concatenation : clip_to_add.close()
+
+            if video_size is None: video_size = (1080, 1920)
+            fallback_clip = ColorClip(size=video_size, color=(0, 0, 0), duration=segment_duration)
+            video_segments_for_concatenation.append(fallback_clip)
+            logging.debug(f"Prepared fallback background segment (ColorClip) with duration {segment_duration}s due to error.")
+
+        return video_segments_for_concatenation, video_size
+
+    # Case 2: Subtitles are present
+    num_subs_per_segment = 3
+    logging.info(f"Subtitles found. Preparing background segments based on subtitle timings (approx. {num_subs_per_segment} subtitles per segment).")
+    for i in range(0, len(subtitles), num_subs_per_segment):
+        start_time_sub = subtitles[i].start.ordinal / 1000.0 # Keep for reference, not for clip.with_start()
+        end_idx = min(i + num_subs_per_segment, len(subtitles))
+        actual_end_time_for_segment_sub = subtitles[end_idx - 1].end.ordinal / 1000.0
         
-        start_time = subtitles[i].start.ordinal / 1000.0
-        end_idx = min(i + 3, len(subtitles))
-        end_time = subtitles[end_idx - 1].end.ordinal / 1000.0
-        duration = end_time - start_time
-        
-        image_clip_to_add = None
+        duration = actual_end_time_for_segment_sub - start_time_sub
+        if duration <= 0:
+            logging.warning(f"Calculated non-positive duration {duration:.2f}s for a background segment based on subtitles {subtitles[i].index} to {subtitles[end_idx-1].index}. Skipping this segment.")
+            continue
+
+        current_image_index = (current_image_index + 1)
+        clip_to_add = None
         current_image_path = None
+        source_type = "ColorClip" # Default for logging
+
         try:
             if available_background_images:
                 current_image_path = available_background_images[current_image_index % len(available_background_images)]
                 temp_image_clip = ImageClip(current_image_path)
+                source_type = f"ImageClip ('{current_image_path}')"
             elif default_fallback_image_path and os.path.isfile(default_fallback_image_path) and os.access(default_fallback_image_path, os.R_OK):
-                 logging.info(f"No images in {BACKGROUND_IMAGES_DIR}, using default fallback: {default_fallback_image_path} for a segment.")
-                 current_image_path = default_fallback_image_path # For logging
-                 temp_image_clip = ImageClip(default_fallback_image_path)
+                logging.info(f"No images in {BACKGROUND_IMAGES_DIR} for segment {i//num_subs_per_segment + 1}, using default fallback: {default_fallback_image_path}.")
+                current_image_path = default_fallback_image_path
+                temp_image_clip = ImageClip(default_fallback_image_path)
+                source_type = f"ImageClip (default fallback '{current_image_path}')"
             else: # No images and no default fallback, use ColorClip
-                if video_size is None: video_size = (1080, 1920) 
-                image_clip_to_add = ColorClip(size=video_size, color=(0,0,0), duration=duration)
-                logging.debug(f"Using ColorClip for background segment {i//3+1} as no images are available.")
+                if video_size is None:
+                    video_size = (1080, 1920)
+                    logging.info(f"Video size not yet determined and no images available for segment {i//num_subs_per_segment + 1}. Defaulting to {video_size}.")
+                # else: video_size is already set, use it.
+                clip_to_add = ColorClip(size=video_size, color=(0, 0, 0), duration=duration)
+                source_type = "ColorClip (black fallback)"
+                logging.debug(f"Using {source_type} for background segment {i//num_subs_per_segment + 1} as no images are available.")
 
-            if image_clip_to_add is None: # temp_image_clip was loaded
-                if video_size is None: video_size = temp_image_clip.size
+            if clip_to_add is None: # This means temp_image_clip was loaded (or attempted)
+                if video_size is None:
+                    video_size = temp_image_clip.size
+                    logging.info(f"Video size determined from '{current_image_path}': {video_size} for segment {i//num_subs_per_segment + 1}.")
+                
                 if temp_image_clip.size != video_size:
+                    logging.debug(f"Resizing image '{current_image_path}' from {temp_image_clip.size} to {video_size} for segment {i//num_subs_per_segment + 1}.")
                     resized_clip = temp_image_clip.resized(video_size)
-                    temp_image_clip.close() 
-                    image_clip_to_add = resized_clip
+                    temp_image_clip.close()
+                    image_clip_to_use = resized_clip
                 else:
-                    image_clip_to_add = temp_image_clip
-            
-            segment = image_clip_to_add.with_duration(duration).with_start(start_time)
-            video_segments.append(segment)
-            logging.debug(f"Prepared background segment {i//3+1} using '{current_image_path if current_image_path else 'ColorClip'}' for duration {duration}s.")
+                    image_clip_to_use = temp_image_clip
+                
+                clip_to_add = image_clip_to_use.with_duration(duration)
+
+            video_segments_for_concatenation.append(clip_to_add)
+            logging.debug(f"Prepared background segment {i//num_subs_per_segment + 1} using {source_type} with duration {duration:.2f}s.")
 
         except Exception as e:
             err_msg_path = current_image_path if current_image_path else "the selected image/colorclip"
-            logging.error(f"Error with background {err_msg_path} for segment {i//3+1}: {e}. Using black ColorClip fallback.")
-            if 'temp_image_clip' in locals() and image_clip_to_add != temp_image_clip : temp_image_clip.close()
-            if image_clip_to_add and image_clip_to_add not in video_segments : image_clip_to_add.close()
-            if video_size is None: video_size = (1080, 1920)
-            fallback_segment = ColorClip(size=video_size, color=(0,0,0), duration=duration).with_start(start_time)
-            video_segments.append(fallback_segment)
+            logging.error(f"Error with background {err_msg_path} for segment {i//num_subs_per_segment + 1} (duration {duration:.2f}s): {e}. Using black ColorClip fallback.")
+            # Ensure any partially created/loaded clips are closed if not added
+            if 'temp_image_clip' in locals() and clip_to_add != temp_image_clip: temp_image_clip.close()
+            if 'image_clip_to_use' in locals() and clip_to_add != image_clip_to_use: image_clip_to_use.close()
+            if clip_to_add and clip_to_add not in video_segments_for_concatenation: clip_to_add.close()
+
+            if video_size is None:
+                video_size = (1080, 1920)
+                logging.warning(f"Video size was None during error handling for segment {i//num_subs_per_segment + 1}. Defaulted to {video_size}.")
             
-    return video_segments, video_size
+            fallback_segment = ColorClip(size=video_size, color=(0, 0, 0), duration=duration)
+            video_segments_for_concatenation.append(fallback_segment)
+            logging.debug(f"Prepared fallback background segment (ColorClip) for segment {i//num_subs_per_segment + 1} with duration {duration:.2f}s due to error.")
+            
+    return video_segments_for_concatenation, video_size
 
 def _generate_subtitle_overlay_clips(subtitles, video_size, audio_clip_duration, srt_filepath_logging):
     """
@@ -381,20 +450,99 @@ def create_full_video(audio_path, srt_path, output_path):
                 logging.warning(f"Default background '{DEFAULT_BACKGROUND_IMAGE}' not found/readable. Black backgrounds will be used.")
                 available_bg_images = []
 
-        video_segments, video_size = _prepare_background_segments(subtitles_pysrt, available_bg_images, None, audio_clip.duration, DEFAULT_BACKGROUND_IMAGE if not available_bg_images else None)
+        prepared_bg_clips, video_size = _prepare_background_segments(subtitles_pysrt, available_bg_images, None, audio_clip.duration, DEFAULT_BACKGROUND_IMAGE if not available_bg_images else None)
 
-        if video_size is None: # If _prepare_background_segments couldn't determine it (e.g. no images, no subtitles)
+        if video_size is None: # If _prepare_background_segments couldn't determine it
             video_size = (1080, 1920) # Default
-            logging.warning(f"Video size could not be determined; defaulting to {video_size} for '{audio_path}'.")
+            logging.warning(f"Video size could not be determined by _prepare_background_segments; defaulting to {video_size} for '{audio_path}'.")
+
+        # Handle empty or invalid prepared_bg_clips
+        if not prepared_bg_clips:
+            logging.warning(f"No background clips were prepared by _prepare_background_segments for '{audio_path}'. Creating a single black ColorClip for the full audio duration.")
+            if video_size is None: # Should have been set above, but as a fallback
+                video_size = (1080, 1920)
+                logging.warning(f"Video size was still None when creating fallback background. Defaulted to {video_size}.")
+            fallback_bg_clip = ColorClip(size=video_size, color=(0,0,0), duration=audio_clip.duration)
+            prepared_bg_clips = [fallback_bg_clip]
+            
+        # Calculate current total duration of background clips and adjust the last clip
+        if prepared_bg_clips: # Should always be true now due to the above fallback
+            total_bg_duration = sum(clip.duration for clip in prepared_bg_clips if clip.duration is not None)
+            logging.debug(f"Initial total_bg_duration: {total_bg_duration:.2f}s for {len(prepared_bg_clips)} segments.")
+
+            duration_difference = audio_clip.duration - total_bg_duration
+            
+            if abs(duration_difference) > 0.01: # Only adjust if difference is meaningful
+                last_clip = prepared_bg_clips[-1]
+                original_last_clip_duration = last_clip.duration if last_clip.duration is not None else 0
+                new_last_clip_duration = original_last_clip_duration + duration_difference
+                
+                logging.info(f"Adjusting last background clip duration. Original total: {total_bg_duration:.2f}s, Target audio: {audio_clip.duration:.2f}s, Difference: {duration_difference:.2f}s.")
+                logging.info(f"Last clip original duration: {original_last_clip_duration:.2f}s, New proposed duration: {new_last_clip_duration:.2f}s.")
+
+                if new_last_clip_duration <= 0:
+                    logging.warning(f"New last clip duration ({new_last_clip_duration:.2f}s) is zero or negative. Setting to a small positive value (0.04s).")
+                    new_last_clip_duration = 0.04 # 1 frame at 25fps
+                
+                # Create a new clip with the adjusted duration
+                try:
+                    # Ensure we handle cases where the last clip might not have a standard 'resize' or other ImageClip/ColorClip methods directly
+                    # Re-creating based on type or using with_duration which is generally safe.
+                    adjusted_last_clip = last_clip.with_duration(new_last_clip_duration)
+                    
+                    # Close the old last_clip if it's not the same object and has a close method
+                    if last_clip != adjusted_last_clip and hasattr(last_clip, 'close') and callable(last_clip.close):
+                        last_clip.close() 
+                        
+                    prepared_bg_clips[-1] = adjusted_last_clip
+                    logging.info(f"Last background clip duration adjusted to: {new_last_clip_duration:.2f}s.")
+                    # Recalculate for logging
+                    final_total_bg_duration = sum(clip.duration for clip in prepared_bg_clips if clip.duration is not None)
+                    logging.debug(f"Final total_bg_duration after adjustment: {final_total_bg_duration:.2f}s.")
+                except Exception as e:
+                    logging.error(f"Error adjusting duration for the last clip: {e}. Using original last clip.")
+            else:
+                logging.debug(f"No significant duration adjustment needed for background clips (difference: {duration_difference:.2f}s).")
+        else: # This case should ideally not be reached if the fallback logic is correct
+            logging.error("prepared_bg_clips is unexpectedly empty even after fallback. Cannot create background track.")
+            return
+
+        # Concatenate background clips into a single track
+        final_background_track = None
+        if prepared_bg_clips:
+            try:
+                # Filter out None durations just in case, though new_last_clip_duration should be positive.
+                valid_clips_for_concat = [c for c in prepared_bg_clips if c.duration is not None and c.duration > 0]
+                if valid_clips_for_concat:
+                    final_background_track = concatenate_videoclips(valid_clips_for_concat, method="chain")
+                    logging.debug(f"Background clips concatenated successfully into a track of duration: {final_background_track.duration:.2f}s.")
+                else:
+                    logging.error("No valid background clips with positive duration to concatenate. Cannot create background track.")
+                    # Create a full duration black clip as ultimate fallback if concatenation fails
+                    if video_size is None: video_size = (1080, 1920)
+                    final_background_track = ColorClip(size=video_size, color=(0,0,0), duration=audio_clip.duration)
+                    logging.warning("Using a full duration black ColorClip as final_background_track due to concatenation issues.")
+
+            except Exception as e:
+                logging.error(f"Error during background clip concatenation: {e}. Using a fallback black background.")
+                if video_size is None: video_size = (1080, 1920)
+                final_background_track = ColorClip(size=video_size, color=(0,0,0), duration=audio_clip.duration)
+        
+        if not final_background_track: # Should be set by now
+            logging.error("final_background_track is None. Aborting video creation.")
+            # Close individual prepared_bg_clips if final_background_track wasn't made
+            for clip in prepared_bg_clips:
+                if hasattr(clip, 'close') and callable(clip.close):
+                    clip.close()
+            return
 
         subtitle_clips_list = _generate_subtitle_overlay_clips(subtitles_pysrt, video_size, audio_clip.duration, srt_path)
         
-        if not video_segments: # Should be handled by _prepare_background_segments, but as a safeguard
-            logging.error(f"No video segments (backgrounds) were prepared for '{audio_path}'. Aborting video creation.")
-            return 
-
-        logging.debug(f"Compositing {len(video_segments)} video segments and {len(subtitle_clips_list)} subtitle overlay clips for '{audio_path}'.")
-        final_clips_for_composition = video_segments + subtitle_clips_list
+        logging.debug(f"Compositing final background track and {len(subtitle_clips_list)} subtitle overlay clips for '{audio_path}'.")
+        # The final_background_track is already set to the full audio_clip.duration (or should be)
+        # Subtitle clips have their own start times and durations.
+        final_clips_for_composition = [final_background_track] + subtitle_clips_list
+        
         video_with_subtitles = CompositeVideoClip(final_clips_for_composition, size=video_size).with_duration(audio_clip.duration)
         video_with_subtitles = video_with_subtitles.with_audio(audio_clip)
         
@@ -436,15 +584,40 @@ def create_full_video(audio_path, srt_path, output_path):
         if 'video_with_subtitles' in locals(): video_with_subtitles.close()
         if 'audio_clip' in locals() and audio_clip: audio_clip.close() # Check audio_clip is not None
         # video_segments and subtitle_clips_list elements are closed if they are part of final_clips_for_composition
-        # by video_with_subtitles.close() or individually if not part of it (e.g. error before composition)
-        # However, CompositeVideoClip.close() should handle closing of its constituent clips.
-        # Explicitly closing here is safer if composition fails or if clips weren't added.
-        for segment in video_segments: 
-            if segment and segment not in getattr(video_with_subtitles, 'clips', [] if video_with_subtitles else []): 
-                segment.close()
-        for clip_obj in subtitle_clips_list: # Renamed clip to clip_obj
-            if clip_obj and clip_obj not in getattr(video_with_subtitles, 'clips', [] if video_with_subtitles else []): 
-                clip_obj.close()
+        # by video_with_subtitles.close().
+        # The original elements of prepared_bg_clips (that formed final_background_track)
+        # should be closed when final_background_track is closed if concatenate_videoclips manages this.
+        # If concatenate_videoclips doesn't close its sources, or if it fails, they might need individual closing.
+        # However, `prepared_bg_clips` might contain a new adjusted_last_clip, and the original last_clip was closed.
+        # It's complex; MoviePy's memory management can be tricky.
+        # CompositeVideoClip is expected to close its `clips` list elements.
+        # If final_background_track was part of `video_with_subtitles.clips`, it gets closed.
+        # If final_background_track itself is a CompositeClip (like from concatenate_videoclips), it should close its sources.
+
+        # Safest to close what we explicitly know might not be in the final composite if errors occurred early.
+        # If video_with_subtitles was successfully created, its .close() should handle most.
+        # The individual clips in prepared_bg_clips (if not part of final_background_track due to error)
+        # or subtitle_clips_list (if not part of video_with_subtitles) might need closing.
+        
+        # If final_background_track was created but not used in video_with_subtitles (e.g. error before that stage)
+        if 'final_background_track' in locals() and final_background_track:
+             if not video_with_subtitles or (video_with_subtitles and final_background_track not in video_with_subtitles.clips):
+                if hasattr(final_background_track, 'close') and callable(final_background_track.close):
+                    logging.debug("Closing final_background_track as it's not in the final composite video.")
+                    final_background_track.close()
+        elif 'prepared_bg_clips' in locals(): # If final_background_track failed creation
+            logging.debug("Closing individual prepared_bg_clips as final_background_track was not created/used.")
+            for clip in prepared_bg_clips:
+                if hasattr(clip, 'close') and callable(clip.close):
+                    clip.close()
+
+        # Subtitle clips (excluding the bg_clip which is the first one)
+        for i, clip_obj in enumerate(subtitle_clips_list):
+            if clip_obj and (not video_with_subtitles or clip_obj not in video_with_subtitles.clips):
+                if hasattr(clip_obj, 'close') and callable(clip_obj.close):
+                    # The first subtitle_clip is the semi-transparent bg, others are TextClips
+                    logging.debug(f"Closing subtitle_clips_list item {i} as it's not in the final composite video.")
+                    clip_obj.close()
 
 def sanitize_filename(title):
     """Convert a title to a safe filename."""
