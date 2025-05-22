@@ -593,18 +593,49 @@ def sanitize_filename(title):
     return safe_title.strip()
 
 # New function for clip adjustment prompt
-def prompt_for_clip_adjustment(clip_info, video_duration_seconds):
+def prompt_for_clip_adjustment(clip_info, video_duration_seconds, srt_path):
     """
     Prompts the user to adjust, keep, or skip a clip.
+    Includes context from the SRT file.
     """
     title = clip_info.get('title', 'N/A')
-    original_start_time = clip_info.get('start_time', 'N/A')
-    original_end_time = clip_info.get('end_time', 'N/A')
+    original_start_time_str = clip_info.get('start_time', 'N/A')
+    original_end_time_str = clip_info.get('end_time', 'N/A')
+    clip_content = clip_info.get('content', 'N/A')
+
+    text_before_clip = "No text found immediately before."
+    text_after_clip = "No text found immediately after."
+
+    if srt_path and os.path.exists(srt_path):
+        try:
+            subs = pysrt.open(srt_path, encoding='utf-8')
+            clip_start_seconds = parse_timestamp(original_start_time_str)
+            clip_end_seconds = parse_timestamp(original_end_time_str)
+
+            if clip_start_seconds is not None:
+                for sub in reversed(subs):
+                    sub_end_seconds = sub.end.ordinal / 1000.0
+                    if sub_end_seconds <= clip_start_seconds:
+                        text_before_clip = sub.text
+                        break
+            
+            if clip_end_seconds is not None:
+                for sub in subs:
+                    sub_start_seconds = sub.start.ordinal / 1000.0
+                    if sub_start_seconds >= clip_end_seconds:
+                        text_after_clip = sub.text
+                        break
+        except Exception as e:
+            logging.warning(f"Error processing SRT file '{srt_path}' for context: {e}")
 
     print(f"\n--- Adjust Clip ---")
+    print(f"Text Before Clip: {text_before_clip}")
     print(f"Title: {title}")
-    print(f"Current Start: {original_start_time}")
-    print(f"Current End:   {original_end_time}")
+    print(f"Current Start: {original_start_time_str}")
+    print(f"Current End:   {original_end_time_str}")
+    print(f"Clip Content: {clip_content}")
+    print(f"Text After Clip: {text_after_clip}")
+
     if video_duration_seconds > 0:
         print(f"Video Duration: {format_timedelta(video_duration_seconds)}")
     else:
@@ -628,8 +659,8 @@ def prompt_for_clip_adjustment(clip_info, video_duration_seconds):
         # Logging for 'adjust' will be done after successful validation
         print(f"Adjusting clip '{title}':")
         while True:
-            new_start_input_str = input(f"Enter new start time (current: {original_start_time}, format HH:MM:SS,mmm): ").strip()
-            new_end_input_str = input(f"Enter new end time (current: {original_end_time}, format HH:MM:SS,mmm): ").strip()
+            new_start_input_str = input(f"Enter new start time (current: {original_start_time_str}, format HH:MM:SS,mmm): ").strip()
+            new_end_input_str = input(f"Enter new end time (current: {original_end_time_str}, format HH:MM:SS,mmm): ").strip()
 
             new_start_seconds = parse_timestamp(new_start_input_str)
             new_end_seconds = parse_timestamp(new_end_input_str)
@@ -657,7 +688,7 @@ def prompt_for_clip_adjustment(clip_info, video_duration_seconds):
                 continue
 
             # All validations passed
-            logging.info(f"User chose to ADJUST clip: '{title}'. Original Start: {original_start_time}, Original End: {original_end_time}.")
+            logging.info(f"User chose to ADJUST clip: '{title}'. Original Start: {original_start_time_str}, Original End: {original_end_time_str}.")
             clip_info['start_time'] = format_timedelta(new_start_seconds)
             clip_info['end_time'] = format_timedelta(new_end_seconds)
             
@@ -665,7 +696,7 @@ def prompt_for_clip_adjustment(clip_info, video_duration_seconds):
             clip_info.pop('new_start_time', None)
             clip_info.pop('new_end_time', None)
 
-            logging.info(f"Clip '{title}' adjusted. Original: {original_start_time}->{original_end_time}, New: {clip_info['start_time']}->{clip_info['end_time']}")
+            logging.info(f"Clip '{title}' adjusted. Original: {original_start_time_str}->{original_end_time_str}, New: {clip_info['start_time']}->{clip_info['end_time']}")
             print(f"Clip '{title}' adjusted. New Start: {clip_info['start_time']}, New End: {clip_info['end_time']}")
             return clip_info
 
@@ -1000,7 +1031,7 @@ def _process_single_audio_file(audio_path):
         if clips_to_process and 'clips' in clips_to_process: # Check if clips_to_process is not None
             num_original_clips = len(clips_to_process['clips'])
             for clip_item in clips_to_process['clips']:
-                modified_clip = prompt_for_clip_adjustment(clip_item, video_duration)
+                modified_clip = prompt_for_clip_adjustment(clip_item, video_duration, srt_path) # Pass srt_path
                 if modified_clip:
                     adjusted_clips.append(modified_clip)
             clips_to_process['clips'] = adjusted_clips
