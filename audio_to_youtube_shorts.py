@@ -175,10 +175,10 @@ def generate_subtitle_clip(text, start_time, duration, video_size):
     txt_clip = TextClip(
         text=text,
         size=(int(video_size[0] * 0.85), int(video_size[1] * 0.2)),
-        color='#C8102E',
+        color='white',  # Changed from '#C8102E' to white for better visibility
         font=DEFAULT_FONT_PATH,
-        stroke_color='#FAFAFA',
-        stroke_width=4,
+        stroke_color='black',  # Changed from '#FAFAFA' to black for better contrast
+        stroke_width=3,  # Reduced from 4 to 3 for cleaner look
         method='caption'
     )
     txt_clip = txt_clip.with_duration(duration).with_start(start_time)
@@ -315,8 +315,8 @@ def _generate_subtitle_overlay_clips(subtitles, video_size, audio_clip_duration,
         video_size = (1080, 1920)
 
     # Background for subtitles (semi-transparent black bar)
-    bg_clip = ColorClip(size=video_size, color=(0, 0, 0), ismask=False, duration=audio_clip_duration)
-    bg_clip = bg_clip.with_opacity(0.5)
+    bg_clip = ColorClip(size=video_size, color=(0, 0, 0), duration=audio_clip_duration)
+    bg_clip = bg_clip.with_opacity(0.7)  # Increased opacity from 0.5 to 0.7
     
     subtitle_clips_list = [bg_clip]
     
