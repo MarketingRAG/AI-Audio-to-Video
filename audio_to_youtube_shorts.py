@@ -454,6 +454,83 @@ def sanitize_filename(title):
     safe_title = safe_title[:100]
     return safe_title.strip()
 
+# New function for clip adjustment prompt
+def prompt_for_clip_adjustment(clip_info, video_duration_seconds):
+    """
+    Prompts the user to adjust, keep, or skip a clip.
+    """
+    title = clip_info.get('title', 'N/A')
+    original_start_time = clip_info.get('start_time', 'N/A')
+    original_end_time = clip_info.get('end_time', 'N/A')
+
+    print(f"\n--- Adjust Clip ---")
+    print(f"Title: {title}")
+    print(f"Current Start: {original_start_time}")
+    print(f"Current End:   {original_end_time}")
+    if video_duration_seconds > 0:
+        print(f"Video Duration: {format_timedelta(video_duration_seconds)}")
+    else:
+        print(f"Video Duration: Not available")
+
+    while True:
+        action = input("Choose action: [k]eep, [a]djust, [s]kip clip? (k/a/s): ").lower().strip()
+        if action in ['k', 'a', 's']:
+            break
+        print("Invalid input. Please enter 'k', 'a', or 's'.")
+
+    if action == 'k':
+        logging.info(f"User chose to KEEP clip: '{title}'.")
+        print(f"Keeping clip '{title}' as is.")
+        return clip_info
+    elif action == 's':
+        logging.info(f"User chose to SKIP clip: '{title}'.")
+        print(f"Skipping clip '{title}'.")
+        return None
+    elif action == 'a':
+        # Logging for 'adjust' will be done after successful validation
+        print(f"Adjusting clip '{title}':")
+        while True:
+            new_start_input_str = input(f"Enter new start time (current: {original_start_time}, format HH:MM:SS,mmm): ").strip()
+            new_end_input_str = input(f"Enter new end time (current: {original_end_time}, format HH:MM:SS,mmm): ").strip()
+
+            new_start_seconds = parse_timestamp(new_start_input_str)
+            new_end_seconds = parse_timestamp(new_end_input_str)
+
+            if new_start_seconds is None or new_end_seconds is None:
+                logging.warning(f"Invalid time format entered by user for clip '{title}': Start='{new_start_input_str}', End='{new_end_input_str}'.")
+                print("Invalid time format. Please use HH:MM:SS,mmm (e.g., 00:01:23,456).")
+                # parse_timestamp already logs an error at ERROR level if parsing fails,
+                # so the WARNING here is for the user input attempt.
+                continue
+
+            if new_start_seconds < 0:
+                logging.warning(f"Time validation failed for clip '{title}': Start time {new_start_seconds}s is negative. Input: '{new_start_input_str}'.")
+                print("Start time cannot be negative.")
+                continue
+            
+            if video_duration_seconds > 0 and new_end_seconds > video_duration_seconds: # only check if video_duration is valid
+                logging.warning(f"Time validation failed for clip '{title}': End time {new_end_seconds}s (Input: '{new_end_input_str}') exceeds video duration {video_duration_seconds}s.")
+                print(f"End time ({format_timedelta(new_end_seconds)}) cannot exceed video duration ({format_timedelta(video_duration_seconds)}).")
+                continue
+            
+            if new_start_seconds >= new_end_seconds:
+                logging.warning(f"Time validation failed for clip '{title}': Start time {new_start_seconds}s (Input: '{new_start_input_str}') is not before end time {new_end_seconds}s (Input: '{new_end_input_str}').")
+                print(f"Start time ({format_timedelta(new_start_seconds)}) must be before end time ({format_timedelta(new_end_seconds)}).")
+                continue
+
+            # All validations passed
+            logging.info(f"User chose to ADJUST clip: '{title}'. Original Start: {original_start_time}, Original End: {original_end_time}.")
+            clip_info['start_time'] = format_timedelta(new_start_seconds)
+            clip_info['end_time'] = format_timedelta(new_end_seconds)
+            
+            # Remove temporary keys if they were added from a previous version of the code or different logic path
+            clip_info.pop('new_start_time', None)
+            clip_info.pop('new_end_time', None)
+
+            logging.info(f"Clip '{title}' adjusted. Original: {original_start_time}->{original_end_time}, New: {clip_info['start_time']}->{clip_info['end_time']}")
+            print(f"Clip '{title}' adjusted. New Start: {clip_info['start_time']}, New End: {clip_info['end_time']}")
+            return clip_info
+
 # Step 5: Clip extraction function
 def extract_clips(video_path, clips_data, output_dir='clips'):
     """Extract clips from video using timestamps."""
@@ -758,19 +835,61 @@ def _process_single_audio_file(audio_path):
             clips_to_process = {'clips': validated_clips}
             logging.info(f"Validated {len(validated_clips)} clips for {audio_file_name}.")
             
-            try:
-                with open(clips_json_path, 'w') as f:
-                    json.dump(clips_to_process, f, indent=2)
-                logging.info(f"Saved validated clips JSON to '{clips_json_path}'.")
-            except Exception as e:
-                logging.exception(f"Error saving clips JSON for {audio_file_name}:")
-                # Non-critical, proceed with extraction
+            # JSON saving will be done after adjustment phase
 
-        # Step 5: Create short clips
-        # Ensure clips_to_process is valid before proceeding
+        # Step 5: Clip Adjustment and then Saving JSON / Creating short clips
+        # Ensure clips_to_process is valid before proceeding with adjustment
         if clips_to_process is None or not clips_to_process.get('clips'):
             logging.warning(f"No valid clips (either loaded or generated) available for {audio_file_name}. Skipping clip extraction.")
             return True # Partial success as main video might be done.
+
+        # --- Add clip adjustment phase ---
+        logging.info(f"Starting clip adjustment phase for {audio_file_name}...")
+        video_duration = 0
+        try:
+            full_video_clip_for_duration = VideoFileClip(output_video_path)
+            video_duration = full_video_clip_for_duration.duration
+            full_video_clip_for_duration.close()
+            logging.info(f"Full video duration for {audio_file_name} is {video_duration:.2f} seconds.")
+        except Exception as e:
+            logging.error(f"Error getting video duration for {output_video_path}: {e}. Cannot proceed with interactive clip adjustment.")
+            # Decide if this is fatal for clip extraction or if we proceed with unadjusted clips
+            # For now, let's proceed with unadjusted clips if duration cannot be obtained.
+            # If video_duration remains 0, prompt_for_clip_adjustment will show that.
+
+        adjusted_clips = []
+        num_original_clips = 0
+        if clips_to_process and 'clips' in clips_to_process: # Check if clips_to_process is not None
+            num_original_clips = len(clips_to_process['clips'])
+            for clip_item in clips_to_process['clips']:
+                modified_clip = prompt_for_clip_adjustment(clip_item, video_duration)
+                if modified_clip:
+                    adjusted_clips.append(modified_clip)
+            clips_to_process['clips'] = adjusted_clips
+            num_final_clips = len(adjusted_clips)
+            logging.info(f"Clip adjustment phase completed for {audio_file_name}. Original clips: {num_original_clips}, Final clips: {num_final_clips}.")
+            
+            # Save the possibly modified clips_to_process to JSON
+            # This will also save if adjusted_clips is empty (user skipped all)
+            if clips_to_process: # Ensure clips_to_process itself is not None
+                try:
+                    with open(clips_json_path, 'w') as f:
+                        json.dump(clips_to_process, f, indent=2)
+                    logging.info(f"Saved final (possibly adjusted) clips JSON to '{clips_json_path}'.")
+                except Exception as e:
+                    logging.exception(f"Error saving final clips JSON for {audio_file_name}:")
+                    # Decide if this is critical. For now, non-critical, proceed if possible.
+            else:
+                logging.warning(f"Skipping JSON save for {audio_file_name} as clips_to_process is None (should not happen if loaded/generated correctly).")
+
+        else: # This 'else' corresponds to 'if clips_to_process and 'clips' in clips_to_process:'
+            logging.warning(f"No clips to adjust for {audio_file_name} (clips_to_process or 'clips' key was missing before adjustment).")
+
+
+        if not clips_to_process or not clips_to_process.get('clips'): # Re-check after adjustment and potential save
+            logging.warning(f"No clips remaining after adjustment for {audio_file_name}. Skipping clip extraction.")
+            return True
+
 
         logging.info(f"Step 4 (was 5): Creating short clips for {audio_file_name}...")
         clips_dir = os.path.join(output_dir, 'clips')
