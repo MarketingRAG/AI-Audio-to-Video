@@ -630,110 +630,148 @@ def _process_single_audio_file(audio_path):
     audio_file_name = os.path.basename(audio_path)
     logging.info(f"--- Starting processing for audio file: {audio_file_name} ---")
     try:
-        # Step 1: Transcription
-        logging.info(f"Step 1: Creating transcript for {audio_file_name}...")
-        try:
-            model = whisper.load_model(DEFAULT_WHISPER_MODEL)
-            transcription_result = model.transcribe(audio_path)
-            logging.info(f"Transcription completed for {audio_file_name} using model '{DEFAULT_WHISPER_MODEL}'.")
-        except Exception as e:
-            logging.exception(f"Error during transcription for {audio_file_name}. Skipping this file.")
-            return False
-
-        # Step 2: Create output directory and SRT file
         base_name = os.path.splitext(audio_file_name)[0]
         output_dir = os.path.join(OUTPUT_DIR_BASE, base_name)
+        srt_path = os.path.join(output_dir, f"{base_name}_transcript.srt")
+        skip_transcription = False
+
         try:
             os.makedirs(output_dir, exist_ok=True)
             logging.debug(f"Output directory '{output_dir}' ensured for {audio_file_name}.")
         except OSError as e:
             logging.error(f"Error creating output directory '{output_dir}' for {audio_file_name}: {str(e)}. Skipping this file.")
             return False
-        
-        srt_path = os.path.join(output_dir, f"{base_name}_transcript.srt")
-        try:
-            create_srt(transcription_result["segments"], srt_path)
-            logging.info(f"SRT transcript saved to '{srt_path}' for {audio_file_name}.")
-        except Exception as e:
-            logging.exception(f"Error creating SRT file '{srt_path}' for {audio_file_name}. Skipping this file.")
-            return False
+
+        if os.path.exists(srt_path) and os.access(srt_path, os.R_OK):
+            logging.info(f"SRT file '{srt_path}' already exists. Skipping transcription and SRT creation.")
+            skip_transcription = True
+        else:
+            # Step 1: Transcription
+            logging.info(f"Step 1: Creating transcript for {audio_file_name}...")
+            try:
+                model = whisper.load_model(DEFAULT_WHISPER_MODEL)
+                transcription_result = model.transcribe(audio_path)
+                logging.info(f"Transcription completed for {audio_file_name} using model '{DEFAULT_WHISPER_MODEL}'.")
+            except Exception as e:
+                logging.exception(f"Error during transcription for {audio_file_name}. Skipping this file.")
+                return False
+            
+            # Step 2: Create SRT file (output_dir is already created)
+            try:
+                create_srt(transcription_result["segments"], srt_path)
+                logging.info(f"SRT transcript saved to '{srt_path}' for {audio_file_name}.")
+            except Exception as e:
+                logging.exception(f"Error creating SRT file '{srt_path}' for {audio_file_name}. Skipping this file.")
+                return False
 
         # Step 3: Create full-length video
         logging.info(f"Step 2 (was 3): Creating full-length video for {audio_file_name}...") # Corrected step numbering in log
         output_video_path = os.path.join(output_dir, f"{base_name}_video.mp4")
-        create_full_video(audio_path, srt_path, output_video_path) 
+
+        if os.path.exists(output_video_path) and os.access(output_video_path, os.R_OK):
+            logging.info(f"Full video file '{output_video_path}' already exists. Skipping video creation.")
+        else:
+            create_full_video(audio_path, srt_path, output_video_path) 
         
         if not os.path.exists(output_video_path):
             logging.error(f"Full video creation failed for '{audio_path}'. Skipping clip extraction.")
             return False # Video creation is critical for clip extraction
         logging.info(f"Full-length video created at '{output_video_path}' for {audio_file_name}.")
 
-        # Step 4: Analyze transcript and select clips
-        logging.info(f"Step 3 (was 4): Analyzing transcript for {audio_file_name}...")
-        transcript_content = ""
-        try:
-            with open(srt_path, 'r', encoding='utf-8') as file:
-                transcript_content = file.read()
-            logging.debug(f"Successfully read SRT file '{srt_path}' for analysis.")
-        except Exception as e:
-            logging.exception(f"Error reading SRT file '{srt_path}' for analysis. Skipping clip selection and extraction for this file.")
-            return False # Transcript content is critical for clip selection
-
-        analysis_result = analyze_transcript(transcript_content)
-        if analysis_result is None:
-            logging.error(f"Failed to analyze transcript from '{srt_path}' for {audio_file_name}. Skipping clip extraction.")
-            return True # Partial success: video created, but no clips.
-
-        clips_data = None
-        try:
-            cleaned_result = clean_json_response(analysis_result)
-            clips_data = json.loads(cleaned_result)
-            logging.debug(f"Successfully parsed JSON response from Gemini API for {audio_file_name}.")
-        except json.JSONDecodeError as e:
-            logging.error(f"Error decoding JSON from Gemini for {audio_file_name}: {str(e)}. Raw: {cleaned_result}")
-            return True 
-        except Exception as e:
-            logging.exception(f"Unexpected error parsing Gemini API response for {audio_file_name}:")
-            return True
-
-        # Validate clips_data (copied from original main, could be a sub-helper too)
-        if not isinstance(clips_data, dict) or 'clips' not in clips_data or not isinstance(clips_data.get('clips'), list):
-            logging.error(f"Invalid JSON structure from Gemini for {audio_file_name}. Data: {clips_data}")
-            return True
-        if not clips_data['clips']:
-            logging.info(f"No clips identified by Gemini for {audio_file_name}.")
-            return True
-            
-        validated_clips = []
-        logging.debug(f"Validating {len(clips_data['clips'])} clips from Gemini for {audio_file_name}.")
-        for i, clip_info in enumerate(clips_data['clips'], 1):
-            if not (isinstance(clip_info, dict) and all(k in clip_info for k in ['start_time', 'end_time', 'title', 'content'])):
-                logging.warning(f"Clip item {i} for {audio_file_name} is malformed. Skipping. Data: {clip_info}")
-                continue
-            start_seconds = parse_timestamp(clip_info['start_time'])
-            end_seconds = parse_timestamp(clip_info['end_time'])
-            if start_seconds is None or end_seconds is None or end_seconds <= start_seconds:
-                logging.warning(f"Clip item {i} for {audio_file_name} has invalid/illogical timestamps. Skipping. Start: {clip_info['start_time']}, End: {clip_info['end_time']}")
-                continue
-            validated_clips.append(clip_info)
-
-        if not validated_clips:
-            logging.info(f"No valid clips found for {audio_file_name} after validation.")
-            return True 
-        
-        clips_to_process = {'clips': validated_clips}
-        logging.info(f"Validated {len(validated_clips)} clips for {audio_file_name}.")
-        
+        # Step 4: Analyze transcript / Load existing clips JSON
+        logging.info(f"Step 3 (was 4): Analyzing transcript or loading existing clips JSON for {audio_file_name}...")
         clips_json_path = os.path.join(output_dir, f"{base_name}_clips.json")
-        try:
-            with open(clips_json_path, 'w') as f:
-                json.dump(clips_to_process, f, indent=2)
-            logging.info(f"Saved validated clips JSON to '{clips_json_path}'.")
-        except Exception as e:
-            logging.exception(f"Error saving clips JSON for {audio_file_name}:")
-            # Non-critical, proceed with extraction
+        clips_to_process = None
+        skip_analysis_and_json_creation = False
+
+        if os.path.exists(clips_json_path) and os.access(clips_json_path, os.R_OK):
+            logging.info(f"Clips JSON file '{clips_json_path}' already exists. Loading clips from file.")
+            try:
+                with open(clips_json_path, 'r', encoding='utf-8') as f:
+                    clips_to_process = json.load(f)
+                logging.info(f"Successfully loaded clips from '{clips_json_path}'.")
+                # Basic validation of loaded data
+                if not isinstance(clips_to_process, dict) or 'clips' not in clips_to_process or not isinstance(clips_to_process.get('clips'), list):
+                    logging.warning(f"Loaded clips JSON from '{clips_json_path}' has invalid structure. Will attempt to regenerate.")
+                    clips_to_process = None # Invalidate to trigger regeneration
+                else:
+                    skip_analysis_and_json_creation = True
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding JSON from existing file '{clips_json_path}': {str(e)}. Will attempt to regenerate.")
+                clips_to_process = None # Invalidate to trigger regeneration
+            except Exception as e:
+                logging.exception(f"Unexpected error loading clips JSON from '{clips_json_path}'. Will attempt to regenerate.")
+                clips_to_process = None # Invalidate to trigger regeneration
+        
+        if not skip_analysis_and_json_creation:
+            logging.info(f"Proceeding with transcript analysis for {audio_file_name}.")
+            transcript_content = ""
+            try:
+                with open(srt_path, 'r', encoding='utf-8') as file:
+                    transcript_content = file.read()
+                logging.debug(f"Successfully read SRT file '{srt_path}' for analysis.")
+            except Exception as e:
+                logging.exception(f"Error reading SRT file '{srt_path}' for analysis. Skipping clip selection and extraction for this file.")
+                return False # Transcript content is critical for clip selection
+
+            analysis_result = analyze_transcript(transcript_content)
+            if analysis_result is None:
+                logging.error(f"Failed to analyze transcript from '{srt_path}' for {audio_file_name}. Skipping clip extraction.")
+                return True # Partial success: video created, but no clips.
+
+            clips_data = None
+            try:
+                cleaned_result = clean_json_response(analysis_result)
+                clips_data = json.loads(cleaned_result)
+                logging.debug(f"Successfully parsed JSON response from Gemini API for {audio_file_name}.")
+            except json.JSONDecodeError as e:
+                logging.error(f"Error decoding JSON from Gemini for {audio_file_name}: {str(e)}. Raw: {cleaned_result}")
+                return True 
+            except Exception as e:
+                logging.exception(f"Unexpected error parsing Gemini API response for {audio_file_name}:")
+                return True
+
+            if not isinstance(clips_data, dict) or 'clips' not in clips_data or not isinstance(clips_data.get('clips'), list):
+                logging.error(f"Invalid JSON structure from Gemini for {audio_file_name}. Data: {clips_data}")
+                return True
+            if not clips_data['clips']:
+                logging.info(f"No clips identified by Gemini for {audio_file_name}.")
+                return True
+                
+            validated_clips = []
+            logging.debug(f"Validating {len(clips_data['clips'])} clips from Gemini for {audio_file_name}.")
+            for i, clip_info in enumerate(clips_data['clips'], 1):
+                if not (isinstance(clip_info, dict) and all(k in clip_info for k in ['start_time', 'end_time', 'title', 'content'])):
+                    logging.warning(f"Clip item {i} for {audio_file_name} is malformed. Skipping. Data: {clip_info}")
+                    continue
+                start_seconds = parse_timestamp(clip_info['start_time'])
+                end_seconds = parse_timestamp(clip_info['end_time'])
+                if start_seconds is None or end_seconds is None or end_seconds <= start_seconds:
+                    logging.warning(f"Clip item {i} for {audio_file_name} has invalid/illogical timestamps. Skipping. Start: {clip_info['start_time']}, End: {clip_info['end_time']}")
+                    continue
+                validated_clips.append(clip_info)
+
+            if not validated_clips:
+                logging.info(f"No valid clips found for {audio_file_name} after validation.")
+                return True 
+            
+            clips_to_process = {'clips': validated_clips}
+            logging.info(f"Validated {len(validated_clips)} clips for {audio_file_name}.")
+            
+            try:
+                with open(clips_json_path, 'w') as f:
+                    json.dump(clips_to_process, f, indent=2)
+                logging.info(f"Saved validated clips JSON to '{clips_json_path}'.")
+            except Exception as e:
+                logging.exception(f"Error saving clips JSON for {audio_file_name}:")
+                # Non-critical, proceed with extraction
 
         # Step 5: Create short clips
+        # Ensure clips_to_process is valid before proceeding
+        if clips_to_process is None or not clips_to_process.get('clips'):
+            logging.warning(f"No valid clips (either loaded or generated) available for {audio_file_name}. Skipping clip extraction.")
+            return True # Partial success as main video might be done.
+
         logging.info(f"Step 4 (was 5): Creating short clips for {audio_file_name}...")
         clips_dir = os.path.join(output_dir, 'clips')
         extract_clips(output_video_path, clips_to_process, clips_dir)
