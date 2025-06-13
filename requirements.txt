@@ -3,4 +3,5 @@ moviepy>=2.1.2
 python-dotenv>=1.0.0
 openai-whisper>=20240930
 pysrt>=1.1.2
-numpy>=1.21.0 
+numpy>=1.21.0
+streamlit>=1.0.0

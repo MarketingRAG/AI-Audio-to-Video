@@ -29,9 +29,9 @@ DEFAULT_FONT_PATH = "/usr/share/fonts/truetype/msttcorefonts/Arial.ttf"
 # For more robust cross-platform behavior, providing a path or ensuring font is in a known location is better.
 DEFAULT_WHISPER_MODEL = "base"
 DEFAULT_BACKGROUND_IMAGE = "background.jpg" # Used if no images are in BACKGROUND_IMAGES_DIR
-BACKGROUND_IMAGES_DIR = "background_images"
-AUDIO_FILES_DIR = "audio_file"
-OUTPUT_DIR_BASE = "output"
+BACKGROUND_IMAGES_DIR = "background_images" # This might be made configurable or relative to output_base_dir later
+# AUDIO_FILES_DIR = "audio_file" # Removed as input is now a parameter
+OUTPUT_DIR_BASE = "output" # Kept for now, might be used by test in main
 # --- End Configuration ---
 
 # Step 3: Define utility functions for video and subtitle processing
@@ -595,8 +595,8 @@ def sanitize_filename(title):
 # New function for clip adjustment prompt
 def prompt_for_clip_adjustment(clip_info, video_duration_seconds, srt_path):
     """
-    Prompts the user to adjust, keep, or skip a clip.
-    Includes context from the SRT file.
+    Logs that it's automatically accepting the clip and returns it as is.
+    Context from the SRT file can be logged.
     """
     title = clip_info.get('title', 'N/A')
     original_start_time_str = clip_info.get('start_time', 'N/A')
@@ -637,68 +637,14 @@ def prompt_for_clip_adjustment(clip_info, video_duration_seconds, srt_path):
     print(f"Text After Clip: {text_after_clip}")
 
     if video_duration_seconds > 0:
-        print(f"Video Duration: {format_timedelta(video_duration_seconds)}")
-    else:
-        print(f"Video Duration: Not available")
+    print(f"Video Duration: {format_timedelta(video_duration_seconds)}" if video_duration_seconds > 0 else "Video Duration: Not available")
 
-    while True:
-        action = input("Choose action: [k]eep, [a]djust, [s]kip clip? (k/a/s): ").lower().strip()
-        if action in ['k', 'a', 's']:
-            break
-        print("Invalid input. Please enter 'k', 'a', or 's'.")
-
-    if action == 'k':
-        logging.info(f"User chose to KEEP clip: '{title}'.")
-        print(f"Keeping clip '{title}' as is.")
-        return clip_info
-    elif action == 's':
-        logging.info(f"User chose to SKIP clip: '{title}'.")
-        print(f"Skipping clip '{title}'.")
-        return None
-    elif action == 'a':
-        # Logging for 'adjust' will be done after successful validation
-        print(f"Adjusting clip '{title}':")
-        while True:
-            new_start_input_str = input(f"Enter new start time (current: {original_start_time_str}, format HH:MM:SS,mmm): ").strip()
-            new_end_input_str = input(f"Enter new end time (current: {original_end_time_str}, format HH:MM:SS,mmm): ").strip()
-
-            new_start_seconds = parse_timestamp(new_start_input_str)
-            new_end_seconds = parse_timestamp(new_end_input_str)
-
-            if new_start_seconds is None or new_end_seconds is None:
-                logging.warning(f"Invalid time format entered by user for clip '{title}': Start='{new_start_input_str}', End='{new_end_input_str}'.")
-                print("Invalid time format. Please use HH:MM:SS,mmm (e.g., 00:01:23,456).")
-                # parse_timestamp already logs an error at ERROR level if parsing fails,
-                # so the WARNING here is for the user input attempt.
-                continue
-
-            if new_start_seconds < 0:
-                logging.warning(f"Time validation failed for clip '{title}': Start time {new_start_seconds}s is negative. Input: '{new_start_input_str}'.")
-                print("Start time cannot be negative.")
-                continue
-            
-            if video_duration_seconds > 0 and new_end_seconds > video_duration_seconds: # only check if video_duration is valid
-                logging.warning(f"Time validation failed for clip '{title}': End time {new_end_seconds}s (Input: '{new_end_input_str}') exceeds video duration {video_duration_seconds}s.")
-                print(f"End time ({format_timedelta(new_end_seconds)}) cannot exceed video duration ({format_timedelta(video_duration_seconds)}).")
-                continue
-            
-            if new_start_seconds >= new_end_seconds:
-                logging.warning(f"Time validation failed for clip '{title}': Start time {new_start_seconds}s (Input: '{new_start_input_str}') is not before end time {new_end_seconds}s (Input: '{new_end_input_str}').")
-                print(f"Start time ({format_timedelta(new_start_seconds)}) must be before end time ({format_timedelta(new_end_seconds)}).")
-                continue
-
-            # All validations passed
-            logging.info(f"User chose to ADJUST clip: '{title}'. Original Start: {original_start_time_str}, Original End: {original_end_time_str}.")
-            clip_info['start_time'] = format_timedelta(new_start_seconds)
-            clip_info['end_time'] = format_timedelta(new_end_seconds)
-            
-            # Remove temporary keys if they were added from a previous version of the code or different logic path
-            clip_info.pop('new_start_time', None)
-            clip_info.pop('new_end_time', None)
-
-            logging.info(f"Clip '{title}' adjusted. Original: {original_start_time_str}->{original_end_time_str}, New: {clip_info['start_time']}->{clip_info['end_time']}")
-            print(f"Clip '{title}' adjusted. New Start: {clip_info['start_time']}, New End: {clip_info['end_time']}")
-            return clip_info
+    # Log that the clip is being automatically accepted.
+    logging.info(f"Automatically accepting clip: '{title}'. Original Start: {original_start_time_str}, Original End: {original_end_time_str}.")
+    # The print statements for context can be kept for logging/debugging if desired,
+    # but no user interaction will occur.
+    # print(f"Keeping clip '{title}' as is.") # Optional: if you want this on console too
+    return clip_info
 
 # Step 5: Clip extraction function
 def extract_clips(video_path, clips_data, output_dir='clips'):
@@ -845,47 +791,42 @@ def setup_logging():
 
 def main():
     setup_logging()
-    logging.info("Script execution started.")
-    audio_files = get_audio_files() 
-    
-    if not audio_files:
-        logging.warning(f"No audio files found in the '{AUDIO_FILES_DIR}' directory. Please add audio files and try again.")
-        return
-    
-    logging.info(f"Found {len(audio_files)} audio file(s) to process: {', '.join(map(os.path.basename, audio_files))}")
-    
-    successful_files = 0
-    failed_files = 0
-
-    for audio_path in audio_files:
-        if _process_single_audio_file(audio_path):
-            successful_files += 1
-        else:
-            failed_files +=1
-            
-    logging.info(f"--- All audio file processing complete ---")
-    logging.info(f"Successfully processed: {successful_files} file(s).")
-    logging.info(f"Failed to process: {failed_files} file(s).")
+    logging.info("Script execution started for testing.")
+    # Example usage (ensure you have a test file and output directory):
+    # test_audio_path = "/path/to/your/sample_audio.mp3"  # Replace with an actual file path
+    # test_output_dir = "/tmp/test_output" # Replace with a writable directory path
+    # if test_audio_path and os.path.exists(test_audio_path) and test_output_dir:
+    #    os.makedirs(test_output_dir, exist_ok=True)
+    #    process_media_file(test_audio_path, test_output_dir)
+    # else:
+    #    if not test_audio_path or not os.path.exists(test_audio_path):
+    #        logging.error(f"Test audio file not found or not specified: {test_audio_path}")
+    #    if not test_output_dir:
+    #        logging.error(f"Test output directory not specified.")
+    logging.info("Script execution for testing finished.")
 
 
-def _process_single_audio_file(audio_path):
+def process_media_file(input_file_path, output_base_dir):
     """
-    Processes a single audio file: transcription, full video, transcript analysis, and clip extraction.
+    Processes a single media file: transcription, full video, transcript analysis, and clip extraction.
+    Outputs are stored in a subdirectory of output_base_dir named after the input file.
     Returns True if processing was successful (or mostly successful), False otherwise.
     """
-    audio_file_name = os.path.basename(audio_path)
-    logging.info(f"--- Starting processing for audio file: {audio_file_name} ---")
+    media_file_name = os.path.basename(input_file_path)
+    logging.info(f"--- Starting processing for media file: {media_file_name} ---")
     try:
-        base_name = os.path.splitext(audio_file_name)[0]
-        output_dir = os.path.join(OUTPUT_DIR_BASE, base_name)
-        srt_path = os.path.join(output_dir, f"{base_name}_transcript.srt")
+        base_name = os.path.splitext(media_file_name)[0]
+        # All outputs for this specific file go into a subdirectory of output_base_dir
+        file_specific_output_dir = os.path.join(output_base_dir, base_name)
+
+        srt_path = os.path.join(file_specific_output_dir, f"{base_name}_transcript.srt")
         skip_transcription = False
 
         try:
-            os.makedirs(output_dir, exist_ok=True)
-            logging.debug(f"Output directory '{output_dir}' ensured for {audio_file_name}.")
+            os.makedirs(file_specific_output_dir, exist_ok=True)
+            logging.debug(f"Output directory '{file_specific_output_dir}' ensured for {media_file_name}.")
         except OSError as e:
-            logging.error(f"Error creating output directory '{output_dir}' for {audio_file_name}: {str(e)}. Skipping this file.")
+            logging.error(f"Error creating output directory '{file_specific_output_dir}' for {media_file_name}: {str(e)}. Skipping this file.")
             return False
 
         if os.path.exists(srt_path) and os.access(srt_path, os.R_OK):
@@ -893,40 +834,40 @@ def _process_single_audio_file(audio_path):
             skip_transcription = True
         else:
             # Step 1: Transcription
-            logging.info(f"Step 1: Creating transcript for {audio_file_name}...")
+            logging.info(f"Step 1: Creating transcript for {media_file_name}...")
             try:
                 model = whisper.load_model(DEFAULT_WHISPER_MODEL)
-                transcription_result = model.transcribe(audio_path)
-                logging.info(f"Transcription completed for {audio_file_name} using model '{DEFAULT_WHISPER_MODEL}'.")
+                transcription_result = model.transcribe(input_file_path) # Use input_file_path
+                logging.info(f"Transcription completed for {media_file_name} using model '{DEFAULT_WHISPER_MODEL}'.")
             except Exception as e:
-                logging.exception(f"Error during transcription for {audio_file_name}. Skipping this file.")
+                logging.exception(f"Error during transcription for {media_file_name}. Skipping this file.")
                 return False
             
-            # Step 2: Create SRT file (output_dir is already created)
+            # Step 2: Create SRT file (file_specific_output_dir is already created)
             try:
                 create_srt(transcription_result["segments"], srt_path)
-                logging.info(f"SRT transcript saved to '{srt_path}' for {audio_file_name}.")
+                logging.info(f"SRT transcript saved to '{srt_path}' for {media_file_name}.")
             except Exception as e:
-                logging.exception(f"Error creating SRT file '{srt_path}' for {audio_file_name}. Skipping this file.")
+                logging.exception(f"Error creating SRT file '{srt_path}' for {media_file_name}. Skipping this file.")
                 return False
 
         # Step 3: Create full-length video
-        logging.info(f"Step 2 (was 3): Creating full-length video for {audio_file_name}...") # Corrected step numbering in log
-        output_video_path = os.path.join(output_dir, f"{base_name}_video.mp4")
+        logging.info(f"Step 2 (was 3): Creating full-length video for {media_file_name}...")
+        output_video_path = os.path.join(file_specific_output_dir, f"{base_name}_video.mp4")
 
         if os.path.exists(output_video_path) and os.access(output_video_path, os.R_OK):
             logging.info(f"Full video file '{output_video_path}' already exists. Skipping video creation.")
         else:
-            create_full_video(audio_path, srt_path, output_video_path) 
+            create_full_video(input_file_path, srt_path, output_video_path) # Use input_file_path
         
-        if not os.path.exists(output_video_path):
-            logging.error(f"Full video creation failed for '{audio_path}'. Skipping clip extraction.")
+        if not os.path.exists(output_video_path): # Check if video was created or already existed
+            logging.error(f"Full video creation failed or video does not exist for '{input_file_path}'. Skipping clip extraction.")
             return False # Video creation is critical for clip extraction
-        logging.info(f"Full-length video created at '{output_video_path}' for {audio_file_name}.")
+        logging.info(f"Full-length video available at '{output_video_path}' for {media_file_name}.")
 
         # Step 4: Analyze transcript / Load existing clips JSON
-        logging.info(f"Step 3 (was 4): Analyzing transcript or loading existing clips JSON for {audio_file_name}...")
-        clips_json_path = os.path.join(output_dir, f"{base_name}_clips.json")
+        logging.info(f"Step 3 (was 4): Analyzing transcript or loading existing clips JSON for {media_file_name}...")
+        clips_json_path = os.path.join(file_specific_output_dir, f"{base_name}_clips.json")
         clips_to_process = None
         skip_analysis_and_json_creation = False
 
@@ -950,7 +891,7 @@ def _process_single_audio_file(audio_path):
                 clips_to_process = None # Invalidate to trigger regeneration
         
         if not skip_analysis_and_json_creation:
-            logging.info(f"Proceeding with transcript analysis for {audio_file_name}.")
+            logging.info(f"Proceeding with transcript analysis for {media_file_name}.")
             transcript_content = ""
             try:
                 with open(srt_path, 'r', encoding='utf-8') as file:
@@ -962,64 +903,64 @@ def _process_single_audio_file(audio_path):
 
             analysis_result = analyze_transcript(transcript_content)
             if analysis_result is None:
-                logging.error(f"Failed to analyze transcript from '{srt_path}' for {audio_file_name}. Skipping clip extraction.")
+                logging.error(f"Failed to analyze transcript from '{srt_path}' for {media_file_name}. Skipping clip extraction.")
                 return True # Partial success: video created, but no clips.
 
             clips_data = None
             try:
                 cleaned_result = clean_json_response(analysis_result)
                 clips_data = json.loads(cleaned_result)
-                logging.debug(f"Successfully parsed JSON response from Gemini API for {audio_file_name}.")
+                logging.debug(f"Successfully parsed JSON response from Gemini API for {media_file_name}.")
             except json.JSONDecodeError as e:
-                logging.error(f"Error decoding JSON from Gemini for {audio_file_name}: {str(e)}. Raw: {cleaned_result}")
+                logging.error(f"Error decoding JSON from Gemini for {media_file_name}: {str(e)}. Raw: {cleaned_result}")
                 return True 
             except Exception as e:
-                logging.exception(f"Unexpected error parsing Gemini API response for {audio_file_name}:")
+                logging.exception(f"Unexpected error parsing Gemini API response for {media_file_name}:")
                 return True
 
             if not isinstance(clips_data, dict) or 'clips' not in clips_data or not isinstance(clips_data.get('clips'), list):
-                logging.error(f"Invalid JSON structure from Gemini for {audio_file_name}. Data: {clips_data}")
+                logging.error(f"Invalid JSON structure from Gemini for {media_file_name}. Data: {clips_data}")
                 return True
             if not clips_data['clips']:
-                logging.info(f"No clips identified by Gemini for {audio_file_name}.")
+                logging.info(f"No clips identified by Gemini for {media_file_name}.")
                 return True
                 
             validated_clips = []
-            logging.debug(f"Validating {len(clips_data['clips'])} clips from Gemini for {audio_file_name}.")
+            logging.debug(f"Validating {len(clips_data['clips'])} clips from Gemini for {media_file_name}.")
             for i, clip_info in enumerate(clips_data['clips'], 1):
                 if not (isinstance(clip_info, dict) and all(k in clip_info for k in ['start_time', 'end_time', 'title', 'content'])):
-                    logging.warning(f"Clip item {i} for {audio_file_name} is malformed. Skipping. Data: {clip_info}")
+                    logging.warning(f"Clip item {i} for {media_file_name} is malformed. Skipping. Data: {clip_info}")
                     continue
                 start_seconds = parse_timestamp(clip_info['start_time'])
                 end_seconds = parse_timestamp(clip_info['end_time'])
                 if start_seconds is None or end_seconds is None or end_seconds <= start_seconds:
-                    logging.warning(f"Clip item {i} for {audio_file_name} has invalid/illogical timestamps. Skipping. Start: {clip_info['start_time']}, End: {clip_info['end_time']}")
+                    logging.warning(f"Clip item {i} for {media_file_name} has invalid/illogical timestamps. Skipping. Start: {clip_info['start_time']}, End: {clip_info['end_time']}")
                     continue
                 validated_clips.append(clip_info)
 
             if not validated_clips:
-                logging.info(f"No valid clips found for {audio_file_name} after validation.")
+                logging.info(f"No valid clips found for {media_file_name} after validation.")
                 return True 
             
             clips_to_process = {'clips': validated_clips}
-            logging.info(f"Validated {len(validated_clips)} clips for {audio_file_name}.")
+            logging.info(f"Validated {len(validated_clips)} clips for {media_file_name}.")
             
             # JSON saving will be done after adjustment phase
 
         # Step 5: Clip Adjustment and then Saving JSON / Creating short clips
         # Ensure clips_to_process is valid before proceeding with adjustment
         if clips_to_process is None or not clips_to_process.get('clips'):
-            logging.warning(f"No valid clips (either loaded or generated) available for {audio_file_name}. Skipping clip extraction.")
+            logging.warning(f"No valid clips (either loaded or generated) available for {media_file_name}. Skipping clip extraction.")
             return True # Partial success as main video might be done.
 
         # --- Add clip adjustment phase ---
-        logging.info(f"Starting clip adjustment phase for {audio_file_name}...")
+        logging.info(f"Starting clip adjustment phase for {media_file_name}...")
         video_duration = 0
         try:
             full_video_clip_for_duration = VideoFileClip(output_video_path)
             video_duration = full_video_clip_for_duration.duration
             full_video_clip_for_duration.close()
-            logging.info(f"Full video duration for {audio_file_name} is {video_duration:.2f} seconds.")
+            logging.info(f"Full video duration for {media_file_name} is {video_duration:.2f} seconds.")
         except Exception as e:
             logging.error(f"Error getting video duration for {output_video_path}: {e}. Cannot proceed with interactive clip adjustment.")
             # Decide if this is fatal for clip extraction or if we proceed with unadjusted clips
@@ -1036,7 +977,7 @@ def _process_single_audio_file(audio_path):
                     adjusted_clips.append(modified_clip)
             clips_to_process['clips'] = adjusted_clips
             num_final_clips = len(adjusted_clips)
-            logging.info(f"Clip adjustment phase completed for {audio_file_name}. Original clips: {num_original_clips}, Final clips: {num_final_clips}.")
+            logging.info(f"Clip adjustment phase completed for {media_file_name}. Original clips: {num_original_clips}, Final clips: {num_final_clips}.")
             
             # Save the possibly modified clips_to_process to JSON
             # This will also save if adjusted_clips is empty (user skipped all)
@@ -1046,32 +987,34 @@ def _process_single_audio_file(audio_path):
                         json.dump(clips_to_process, f, indent=2)
                     logging.info(f"Saved final (possibly adjusted) clips JSON to '{clips_json_path}'.")
                 except Exception as e:
-                    logging.exception(f"Error saving final clips JSON for {audio_file_name}:")
+                    logging.exception(f"Error saving final clips JSON for {media_file_name}:")
                     # Decide if this is critical. For now, non-critical, proceed if possible.
             else:
-                logging.warning(f"Skipping JSON save for {audio_file_name} as clips_to_process is None (should not happen if loaded/generated correctly).")
+                logging.warning(f"Skipping JSON save for {media_file_name} as clips_to_process is None (should not happen if loaded/generated correctly).")
 
         else: # This 'else' corresponds to 'if clips_to_process and 'clips' in clips_to_process:'
-            logging.warning(f"No clips to adjust for {audio_file_name} (clips_to_process or 'clips' key was missing before adjustment).")
+            logging.warning(f"No clips to adjust for {media_file_name} (clips_to_process or 'clips' key was missing before adjustment).")
 
 
         if not clips_to_process or not clips_to_process.get('clips'): # Re-check after adjustment and potential save
-            logging.warning(f"No clips remaining after adjustment for {audio_file_name}. Skipping clip extraction.")
+            logging.warning(f"No clips remaining after adjustment for {media_file_name}. Skipping clip extraction.")
             return True
 
 
-        logging.info(f"Step 4 (was 5): Creating short clips for {audio_file_name}...")
-        clips_dir = os.path.join(output_dir, 'clips')
-        extract_clips(output_video_path, clips_to_process, clips_dir)
-        logging.info(f"Finished creating short clips for {audio_file_name}.")
+        logging.info(f"Step 4 (was 5): Creating short clips for {media_file_name}...")
+        # Output clips into a 'clips' subdirectory within the file_specific_output_dir
+        clips_output_dir = os.path.join(file_specific_output_dir, 'clips')
+        extract_clips(output_video_path, clips_to_process, clips_output_dir)
+        logging.info(f"Finished creating short clips for {media_file_name}.")
         return True # All main steps completed for this file
 
     except Exception as e:
-        logging.exception(f"--- MAJOR UNEXPECTED ERROR processing {audio_file_name} ---")
+        logging.exception(f"--- MAJOR UNEXPECTED ERROR processing {media_file_name} ---")
         return False
     finally:
-        logging.info(f"--- Finished processing for audio file: {audio_file_name} ---")
+        logging.info(f"--- Finished processing for media file: {media_file_name} ---")
 
 if __name__ == "__main__":
-    main()
-    logging.info("Script execution finished.")
+    # main() # Old main call commented out
+    setup_logging() # Call setup_logging here
+    logging.info("Script execution finished.") # This message might be more appropriate at the end of the testing block in main.
